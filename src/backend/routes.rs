@@ -490,9 +490,6 @@ fn validate_backtest_request(request: &BacktestRunRequest) -> Result<(), String>
     if cfg.end_time <= cfg.start_time {
         return Err("endTime must be greater than startTime".to_string());
     }
-    if cfg.resolution.to_millis() == 0 {
-        return Err("resolution must be a supported timeframe".to_string());
-    }
     Ok(())
 }
 
@@ -509,12 +506,15 @@ async fn run_backtest(
         .unwrap_or_else(|| make_backtest_run_id(&request.config.asset));
 
     if let Err(message) = validate_backtest_request(&request) {
-        return Json(BacktestRunError {
-            run_id,
-            message,
-            progress: Vec::new(),
-        })
-        .into_response();
+        return (
+            StatusCode::BAD_REQUEST,
+            Json(BacktestRunError {
+                run_id,
+                message,
+                progress: Vec::new(),
+            }),
+        )
+            .into_response();
     }
 
     request.run_id = Some(run_id.clone());
@@ -552,12 +552,15 @@ async fn run_backtest(
         Ok(bt) => bt,
         Err(e) => {
             active_guard.release().await;
-            return Json(BacktestRunError {
-                run_id,
-                message: e.to_string(),
-                progress: Vec::new(),
-            })
-            .into_response();
+            return (
+                StatusCode::BAD_REQUEST,
+                Json(BacktestRunError {
+                    run_id,
+                    message: e.to_string(),
+                    progress: Vec::new(),
+                }),
+            )
+                .into_response();
         }
     };
     let mut progress = Vec::new();
@@ -613,12 +616,15 @@ async fn run_backtest(
             })
             .into_response()
         }
-        Err(err) => Json(BacktestRunError {
-            run_id,
-            message: err.to_string(),
-            progress,
-        })
-        .into_response(),
+        Err(err) => (
+            StatusCode::INTERNAL_SERVER_ERROR,
+            Json(BacktestRunError {
+                run_id,
+                message: err.to_string(),
+                progress,
+            }),
+        )
+            .into_response(),
     };
 
     active_guard.release().await;

@@ -1,16 +1,22 @@
 // src/components/MarketDetail.tsx
 // Alternative “Trading Terminal” layout — keyboard/terminal vibes, split panes, neon accents. Keeps the same backend interactions and batching behavior.
-import { KwantChart, type CandleData } from "kwant";
+import { KwantChart, type CandleSeries } from "kwant";
 import { useMemo, useState, useCallback, useEffect, useRef } from "react";
 import { Link, useParams, useNavigate } from "react-router-dom";
 import { useWebSocketContext } from "../context/WebSocketContextStore";
+import { useTheme } from "../context/ThemeContextStore";
 import { RefreshCw } from "lucide-react";
 import { motion, AnimatePresence } from "framer-motion";
-import { formatUTC } from "../chart/utils";
+import { formatUTC, type CandleData } from "../chart/utils";
+import { kwantTheme } from "../chart/kwantTheme";
 import { MAX_DECIMALS, MIN_ORDER_VALUE } from "../consts";
 import { ErrorBanner } from "./ErrorBanner";
 import PositionTable from "./Position";
 import SearchBar from "./SearchBar";
+import {
+    fetchHyperliquidCandles,
+    type HyperliquidInterval,
+} from "../api/hyperliquidCandles";
 
 import {
     decompose,
@@ -24,7 +30,6 @@ import {
     fromTimeFrame,
     get_value,
     into,
-    sanitizeAsset,
     num,
     engineDisplayLabel,
 } from "../types";
@@ -39,7 +44,6 @@ import type {
 } from "../types";
 import { ArrowLeft, Plus, Minus, X } from "lucide-react";
 
-const HYPERLIQUID_INFO_URL = "https://api.hyperliquid.xyz/info";
 const CHART_CANDLE_COUNT = 1_000;
 const CHART_INTERVALS = [
     ["1m", 60_000],
@@ -56,21 +60,8 @@ const CHART_INTERVALS = [
     ["1w", 7 * 24 * 60 * 60_000],
     ["1M", 30 * 24 * 60 * 60_000],
 ] as const;
-type HyperliquidTimeFrame = (typeof CHART_INTERVALS)[number][0];
+type HyperliquidTimeFrame = HyperliquidInterval;
 const DEFAULT_VOLUME_DECIMALS = 8;
-
-interface CandlesSnapshotResponse {
-    t: number;
-    T: number;
-    s: string;
-    i: HyperliquidTimeFrame;
-    o: string;
-    c: string;
-    h: string;
-    l: string;
-    v: string;
-    n: number;
-}
 
 function normalizeVolume(volume: number, decimals: number): number {
     if (!Number.isFinite(volume)) return volume;
@@ -157,10 +148,7 @@ function upsertLiveCandleAcrossTimeframes(
         }
 
         if (interval === "1m") {
-            latestOneMinuteStart = Math.max(
-                latestOneMinuteStart,
-                candle.start
-            );
+            latestOneMinuteStart = Math.max(latestOneMinuteStart, candle.start);
             if (candle.start === liveCandle.openTime) {
                 existingOneMinuteIndex = index;
             }
@@ -170,16 +158,11 @@ function upsertLiveCandleAcrossTimeframes(
     if (liveCandle.openTime < latestOneMinuteStart) return snapshots;
 
     const existingOneMinute =
-        existingOneMinuteIndex >= 0
-            ? snapshots[existingOneMinuteIndex]
-            : null;
+        existingOneMinuteIndex >= 0 ? snapshots[existingOneMinuteIndex] : null;
 
     // Hyperliquid's live 1m volume is cumulative. A smaller value means this
     // websocket update is older than the snapshot/update already in the store.
-    if (
-        existingOneMinute &&
-        liveCandle.vlm < existingOneMinute.volume
-    ) {
+    if (existingOneMinute && liveCandle.vlm < existingOneMinute.volume) {
         return snapshots;
     }
 
@@ -254,44 +237,6 @@ function upsertLiveCandleAcrossTimeframes(
     return additions.length > 0 ? [...merged, ...additions] : merged;
 }
 
-async function candle_snapshot(
-    coin: string,
-    interval: HyperliquidTimeFrame,
-    startTime: number,
-    endTime: number,
-    signal?: AbortSignal
-): Promise<CandleData[]> {
-    const response = await fetch(HYPERLIQUID_INFO_URL, {
-        method: "POST",
-        headers: { "Content-Type": "application/json" },
-        signal,
-        body: JSON.stringify({
-            type: "candleSnapshot",
-            req: { coin, interval, startTime, endTime },
-        }),
-    });
-
-    if (!response.ok) {
-        throw new Error(
-            `Hyperliquid ${interval} candles failed (${response.status})`
-        );
-    }
-
-    const candles = (await response.json()) as CandlesSnapshotResponse[];
-    return candles.map((candle) => ({
-        open: Number(candle.o),
-        high: Number(candle.h),
-        low: Number(candle.l),
-        close: Number(candle.c),
-        start: candle.t,
-        end: candle.T,
-        volume: Number(candle.v),
-        trades: candle.n,
-        asset: candle.s,
-        interval: candle.i,
-    }));
-}
-
 async function loadHyperliquidCandles(
     asset: string,
     signal: AbortSignal
@@ -299,7 +244,7 @@ async function loadHyperliquidCandles(
     const endTime = Date.now();
     const candleGroups = await Promise.all(
         CHART_INTERVALS.map(([interval, intervalMs]) =>
-            candle_snapshot(
+            fetchHyperliquidCandles(
                 asset,
                 interval,
                 Math.max(0, endTime - intervalMs * CHART_CANDLE_COUNT),
@@ -370,6 +315,8 @@ const kindKeys = Object.keys(indicatorParamLabels) as IndicatorName[];
 
 export default function MarketDetail() {
     const { asset: routeAsset } = useParams<{ asset: string }>();
+    const { theme } = useTheme();
+    const chartTheme = useMemo(() => kwantTheme(theme), [theme]);
     const {
         markets,
         universe,
@@ -418,12 +365,23 @@ export default function MarketDetail() {
     );
     const chartAsset = market?.asset ?? routeAsset ?? "";
     const [chartCandles, setChartCandles] = useState<CandleData[]>([]);
-    const formattedChartCandles = useMemo(() => {
+    const formattedChartSeries = useMemo<CandleSeries[]>(() => {
         const volumeDecimals = meta?.szDecimals ?? DEFAULT_VOLUME_DECIMALS;
-        return chartCandles.map((candle) => ({
-            ...candle,
-            volume: normalizeVolume(candle.volume, volumeDecimals),
-        }));
+        return CHART_INTERVALS.map(([interval]) => ({
+            interval,
+            data: chartCandles
+                .filter((candle) => candle.interval === interval)
+                .map((candle) => ({
+                    start: candle.start,
+                    end: candle.end,
+                    open: candle.open,
+                    high: candle.high,
+                    low: candle.low,
+                    close: candle.close,
+                    volume: normalizeVolume(candle.volume, volumeDecimals),
+                    trades: candle.trades,
+                })),
+        })).filter((series) => series.data.length > 0);
     }, [chartCandles, meta?.szDecimals]);
     const latestLiveCandleRef = useRef<{
         asset: string;
@@ -468,7 +426,10 @@ export default function MarketDetail() {
                 ) {
                     return;
                 }
-                console.error("Failed to load Hyperliquid chart candles", error);
+                console.error(
+                    "Failed to load Hyperliquid chart candles",
+                    error
+                );
             });
 
         return () => controller.abort();
@@ -479,11 +440,7 @@ export default function MarketDetail() {
         if (!chartAsset || !liveCandle) return;
 
         setChartCandles((candles) =>
-            upsertLiveCandleAcrossTimeframes(
-                candles,
-                liveCandle,
-                chartAsset
-            )
+            upsertLiveCandleAcrossTimeframes(candles, liveCandle, chartAsset)
         );
     }, [chartAsset, market?.liveCandle]);
 
@@ -969,7 +926,7 @@ export default function MarketDetail() {
                                 currentStrategyName !== "View Only" && (
                                     <>
                                         <Link
-                                            to={`/backtest/${sanitizeAsset(market.asset)}`}
+                                            to={`/backtest/${encodeURIComponent(market.asset)}`}
                                         >
                                             <div className="text-accent-brand-soft hover:bg-glow-5 border-line-subtle mx-auto mb-1 block w-min rounded border px-2 py-0.5 text-center text-[10px] uppercase">
                                                 {"BACKTEST"}
@@ -1074,19 +1031,17 @@ export default function MarketDetail() {
                         <div
                             className={`${Chart} kwant-theme relative min-h-[42vh] sm:min-h-[52vh] lg:min-h-[60vh]`}
                         >
-                            {formattedChartCandles.length > 0 ? (
+                            {formattedChartSeries.length > 0 ? (
                                 <KwantChart
-                                    hlocv_data={formattedChartCandles}
-                                    source_name="hyperliquid"
-                                    enable_caching
-                                    live_price
-                                    show_source
+                                    series={formattedChartSeries}
+                                    sourceName="Hyperliquid"
+                                    livePrice
+                                    showSource
                                     asset={market.asset}
                                     title="KWANT"
-                                    backgroundColor="rgb(var(--app-surface-2))"
-                                    gridColor="rgb(var(--app-bg))"
-                                    secondaryColor="#36c5f0"
-                                    crosshairColor="rgb(var(--app-text))"
+                                    dataKey={chartAsset}
+                                    maxPointsPerSeries={CHART_CANDLE_COUNT}
+                                    theme={chartTheme}
                                 />
                             ) : (
                                 <div className="text-app-text/50 flex min-h-[42vh] items-center justify-center text-xs tracking-widest uppercase sm:min-h-[52vh] lg:min-h-[60vh]">

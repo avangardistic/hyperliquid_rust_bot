@@ -1,22 +1,28 @@
-import { useState, useEffect, useMemo, useCallback } from "react";
+import { useState, useEffect, useMemo } from "react";
 import { useParams, useNavigate, useLocation } from "react-router-dom";
+import { KwantLineChart } from "kwant/line";
 import { useAuth } from "../context/AuthContextStore";
+import { useTheme } from "../context/ThemeContextStore";
 import { fetchBacktestResult } from "../api/backtest";
+import { buildBacktestPerformanceSeries } from "../backtest/performance";
+import { kwantTheme } from "../chart/kwantTheme";
 import type {
     BacktestResultDetail,
     BacktestResult as BacktestResultType,
 } from "../types";
 import { num, formatPrice } from "../types";
 import { formatUTC } from "../chart/utils";
-import LineChart from "../chart/LineChart";
-import LineChartsContainer from "../chart/LineChartsContainer";
-import type { LineSeries } from "../chart/LineChart";
 
-/*
-function _formatUtcMinute(ts: number): string {
-    return new Date(ts).toISOString().slice(0, 16).replace("T", " ") + " UTC";
+const usdFormatter = new Intl.NumberFormat("en-US", {
+    style: "currency",
+    currency: "USD",
+    minimumFractionDigits: 2,
+    maximumFractionDigits: 2,
+});
+
+function formatUsd(value: number): string {
+    return usdFormatter.format(value);
 }
-*/
 
 /** Convert a live BacktestResult into the shape BacktestResultDetail uses */
 function resultToDetail(r: BacktestResultType): BacktestResultDetail {
@@ -44,6 +50,7 @@ function resultToDetail(r: BacktestResultType): BacktestResultDetail {
 export default function BacktestRunDetail() {
     const { runId } = useParams<{ runId: string }>();
     const { token } = useAuth();
+    const { theme } = useTheme();
     const nav = useNavigate();
     const location = useLocation();
 
@@ -56,8 +63,6 @@ export default function BacktestRunDetail() {
     );
     const [loading, setLoading] = useState(!passedResult);
     const [error, setError] = useState<string | null>(null);
-    const [chartStart, setChartStart] = useState(0);
-    const [chartEnd, setChartEnd] = useState(0);
 
     useEffect(() => {
         // Skip fetch if we already have data from router state
@@ -85,69 +90,15 @@ export default function BacktestRunDetail() {
         };
     }, [token, runId, passedResult]);
 
-    // Initialize chart time range when detail loads
-    useEffect(() => {
-        if (!detail || detail.equityCurve.length === 0) return;
-        const first = detail.equityCurve[0].ts;
-        const last = detail.equityCurve[detail.equityCurve.length - 1].ts;
-        const padding = (last - first) * 0.02;
-        setChartStart(first - padding);
-        setChartEnd(last + padding);
-    }, [detail]);
-
-    const handleTimeRangeChange = useCallback((start: number, end: number) => {
-        setChartStart(start);
-        setChartEnd(end);
-    }, []);
-
-    const equitySeries = useMemo<LineSeries[]>(() => {
-        if (!detail) return [];
-        const curve = detail.equityCurve;
-        if (curve.length === 0) return [];
-        return [
-            {
-                label: "Equity",
-                color: "#cf7b15",
-                points: curve.map((p) => ({ ts: p.ts, value: p.equity })),
-            },
-            {
-                label: "Balance",
-                color: "#6b7280",
-                lineWidth: 1,
-                points: curve.map((p) => ({ ts: p.ts, value: p.balance })),
-            },
-        ];
-    }, [detail]);
-
-    const upnlSeries = useMemo<LineSeries[]>(() => {
-        if (!detail) return [];
-        const curve = detail.equityCurve;
-        if (curve.length === 0) return [];
-        return [
-            {
-                label: "uPnL",
-                color: "#22c55e",
-                points: curve.map((p) => ({ ts: p.ts, value: p.upnl })),
-            },
-        ];
-    }, [detail]);
-
-    // Cumulative realized PnL from trades
-    const cumulativePnlSeries = useMemo<LineSeries[]>(() => {
-        if (!detail || detail.trades.length === 0) return [];
-        let cumPnl = 0;
-        const points = detail.trades.map((t) => {
-            cumPnl += t.pnl;
-            return { ts: t.close.time, value: cumPnl };
-        });
-        return [
-            {
-                label: "Cumulative PnL",
-                color: "#a855f7",
-                points,
-            },
-        ];
-    }, [detail]);
+    const chartTheme = useMemo(() => kwantTheme(theme), [theme]);
+    const performance = useMemo(
+        () =>
+            buildBacktestPerformanceSeries(
+                detail?.equityCurve ?? [],
+                detail?.initialEquity ?? 0
+            ),
+        [detail]
+    );
 
     if (loading) {
         return (
@@ -175,6 +126,21 @@ export default function BacktestRunDetail() {
         );
     }
 
+    const netPnl = detail.finalEquity - detail.initialEquity;
+    const returnPct =
+        detail.initialEquity === 0 ? 0 : (netPnl / detail.initialEquity) * 100;
+    const totalTrades = detail.trades.length;
+    const winRate = totalTrades === 0 ? 0 : (detail.wins / totalTrades) * 100;
+    const profitFactor =
+        detail.grossLoss === 0
+            ? detail.grossProfit > 0
+                ? null
+                : 0
+            : detail.grossProfit / Math.abs(detail.grossLoss);
+    const lastPoint = detail.equityCurve.at(-1);
+    const latestRealizedPnl = performance.realizedPnl.at(-1)?.y ?? 0;
+    const latestUnrealizedPnl = performance.unrealizedPnl.at(-1)?.y ?? 0;
+
     return (
         <div className="bg-ink-10 flex flex-1 flex-col p-6">
             {/* Header */}
@@ -194,106 +160,159 @@ export default function BacktestRunDetail() {
             </div>
 
             {/* Summary stats */}
-            <div className="grid grid-cols-2 gap-2 md:grid-cols-4">
-                <div className="border-line-subtle bg-ink-80 rounded border p-2 text-sm">
-                    <p className="text-app-text/50 text-xs">Initial Equity</p>
-                    <p>{num(detail.initialEquity, 2)}</p>
-                </div>
-                <div className="border-line-subtle bg-ink-80 rounded border p-2 text-sm">
-                    <p className="text-app-text/50 text-xs">Final Equity</p>
-                    <p>{num(detail.finalEquity, 2)}</p>
-                </div>
-                <div className="border-line-subtle bg-ink-80 rounded border p-2 text-sm">
-                    <p className="text-app-text/50 text-xs">Gross Profit</p>
-                    <p className="text-accent-success">
-                        +{num(detail.grossProfit, 2)}
+            <div className="grid grid-cols-2 gap-3 lg:grid-cols-4 xl:grid-cols-8">
+                <div className="border-line-subtle bg-ink-80 rounded border p-3">
+                    <p className="text-app-text/45 text-[10px] tracking-wider uppercase">
+                        Net PnL
+                    </p>
+                    <p
+                        className={`mt-1 text-lg font-semibold ${
+                            netPnl >= 0
+                                ? "text-accent-success"
+                                : "text-accent-danger-soft"
+                        }`}
+                    >
+                        {formatUsd(netPnl)}
                     </p>
                 </div>
-                <div className="border-line-subtle bg-ink-80 rounded border p-2 text-sm">
-                    <p className="text-app-text/50 text-xs">Gross Loss</p>
-                    <p className="text-accent-danger-soft">
-                        {num(detail.grossLoss, 2)}
+                <div className="border-line-subtle bg-ink-80 rounded border p-3">
+                    <p className="text-app-text/45 text-[10px] tracking-wider uppercase">
+                        Return
+                    </p>
+                    <p className="mt-1 text-lg font-semibold">
+                        {returnPct >= 0 ? "+" : ""}
+                        {num(returnPct, 2)}%
                     </p>
                 </div>
-                <div className="border-line-subtle bg-ink-80 rounded border p-2 text-sm">
-                    <p className="text-app-text/50 text-xs">Wins / Losses</p>
-                    <p>
-                        {detail.wins} / {detail.losses}
+                <div className="border-line-subtle bg-ink-80 rounded border p-3">
+                    <p className="text-app-text/45 text-[10px] tracking-wider uppercase">
+                        Final Equity
+                    </p>
+                    <p className="mt-1 text-lg font-semibold">
+                        {formatUsd(detail.finalEquity)}
                     </p>
                 </div>
-                <div className="border-line-subtle bg-ink-80 rounded border p-2 text-sm">
-                    <p className="text-app-text/50 text-xs">Avg Win</p>
-                    <p>{num(detail.avgWin, 2)}</p>
+                <div className="border-line-subtle bg-ink-80 rounded border p-3">
+                    <p className="text-app-text/45 text-[10px] tracking-wider uppercase">
+                        Max Drawdown
+                    </p>
+                    <p className="text-accent-danger-soft mt-1 text-lg font-semibold">
+                        {formatUsd(-Math.abs(detail.maxDrawdownAbs))}
+                    </p>
                 </div>
-                <div className="border-line-subtle bg-ink-80 rounded border p-2 text-sm">
-                    <p className="text-app-text/50 text-xs">Avg Loss</p>
-                    <p>{num(detail.avgLoss, 2)}</p>
+                <div className="border-line-subtle bg-ink-80 rounded border p-3">
+                    <p className="text-app-text/45 text-[10px] tracking-wider uppercase">
+                        Trades
+                    </p>
+                    <p className="mt-1 text-lg font-semibold">{totalTrades}</p>
                 </div>
-                <div className="border-line-subtle bg-ink-80 rounded border p-2 text-sm">
-                    <p className="text-app-text/50 text-xs">Expectancy</p>
-                    <p>{num(detail.expectancy, 4)}</p>
+                <div className="border-line-subtle bg-ink-80 rounded border p-3">
+                    <p className="text-app-text/45 text-[10px] tracking-wider uppercase">
+                        Win Rate
+                    </p>
+                    <p className="mt-1 text-lg font-semibold">
+                        {num(winRate, 2)}%
+                    </p>
                 </div>
-                <div className="border-line-subtle bg-ink-80 rounded border p-2 text-sm">
-                    <p className="text-app-text/50 text-xs">Max DD (abs)</p>
-                    <p>{num(detail.maxDrawdownAbs, 2)}</p>
+                <div className="border-line-subtle bg-ink-80 rounded border p-3">
+                    <p className="text-app-text/45 text-[10px] tracking-wider uppercase">
+                        Profit Factor
+                    </p>
+                    <p className="mt-1 text-lg font-semibold">
+                        {profitFactor === null ? "∞" : num(profitFactor, 2)}
+                    </p>
                 </div>
-                <div className="border-line-subtle bg-ink-80 rounded border p-2 text-sm">
-                    <p className="text-app-text/50 text-xs">Candles</p>
-                    <p>
-                        {detail.candlesProcessed} / {detail.candlesLoaded}
+                <div className="border-line-subtle bg-ink-80 rounded border p-3">
+                    <p className="text-app-text/45 text-[10px] tracking-wider uppercase">
+                        Candles
+                    </p>
+                    <p className="mt-1 text-lg font-semibold">
+                        {detail.candlesProcessed}
+                    </p>
+                    <p className="text-app-text/40 text-[10px]">
+                        {detail.candlesLoaded} loaded
                     </p>
                 </div>
             </div>
 
-            {/* Stacked line charts — shared time axis, single crosshair */}
+            {/* Candle-aligned performance charts */}
             {detail.equityCurve.length > 0 && (
-                <div className="border-line-subtle bg-ink-80 z-2 mt-4 overflow-hidden rounded border">
-                    <LineChartsContainer
-                        startTime={chartStart}
-                        endTime={chartEnd}
-                        onTimeRangeChange={handleTimeRangeChange}
-                    >
-                        {({ chartWidth, crosshairX }) => (
-                            <>
-                                <LineChart
-                                    series={equitySeries}
-                                    startTime={chartStart}
-                                    endTime={chartEnd}
-                                    crosshairX={crosshairX}
-                                    chartWidth={chartWidth}
-                                    height={180}
-                                    label="Equity / Balance"
-                                />
-                                <div className="border-line-subtle border-t" />
-                                <LineChart
-                                    series={upnlSeries}
-                                    startTime={chartStart}
-                                    endTime={chartEnd}
-                                    crosshairX={crosshairX}
-                                    chartWidth={chartWidth}
-                                    height={120}
-                                    label="Unrealised PnL"
-                                    zeroLine
-                                />
-                                {cumulativePnlSeries.length > 0 && (
-                                    <>
-                                        <div className="border-line-subtle border-t" />
-                                        <LineChart
-                                            series={cumulativePnlSeries}
-                                            startTime={chartStart}
-                                            endTime={chartEnd}
-                                            crosshairX={crosshairX}
-                                            chartWidth={chartWidth}
-                                            height={120}
-                                            label="Cumulative PnL"
-                                            zeroLine
-                                        />
-                                    </>
-                                )}
-                            </>
-                        )}
-                    </LineChartsContainer>
-                </div>
+                <section className="border-line-subtle bg-ink-80 mt-4 rounded border p-3">
+                    <div className="mb-3 flex flex-wrap items-end justify-between gap-2 px-1">
+                        <div>
+                            <p className="text-app-text/45 text-[10px] tracking-[0.2em] uppercase">
+                                Performance
+                            </p>
+                            <h2 className="text-app-text mt-1 text-base font-semibold">
+                                Candle-aligned account history
+                            </h2>
+                        </div>
+                        <div className="text-app-text/45 text-right text-[10px]">
+                            <p>{performance.equity.length} points</p>
+                            {lastPoint && (
+                                <p>Last mark {formatUTC(lastPoint.ts)}</p>
+                            )}
+                        </div>
+                    </div>
+
+                    <div className="border-line-subtle overflow-hidden rounded border">
+                        <KwantLineChart
+                            data={performance.equity}
+                            dataKey={`${detail.runId}:equity`}
+                            title="Account Equity"
+                            name={formatUsd(
+                                lastPoint?.equity ?? detail.finalEquity
+                            )}
+                            ariaLabel="Backtest account equity over time"
+                            width="100%"
+                            height={300}
+                            xAxis={{ scale: "time", label: "UTC" }}
+                            yAxis={{ label: "Equity", formatter: formatUsd }}
+                            colorMode={{ type: "solid", color: "#ff8904" }}
+                            areaFill={{ opacity: 0.12 }}
+                            maxPoints={5_000}
+                            theme={chartTheme}
+                            timeZone="UTC"
+                        />
+                    </div>
+
+                    <div className="mt-3 grid grid-cols-1 gap-3 xl:grid-cols-2">
+                        <div className="border-line-subtle overflow-hidden rounded border">
+                            <KwantLineChart
+                                data={performance.unrealizedPnl}
+                                dataKey={`${detail.runId}:upnl`}
+                                title="Unrealized PnL"
+                                name={formatUsd(latestUnrealizedPnl)}
+                                ariaLabel="Backtest unrealized profit and loss over time"
+                                variant="pnl"
+                                width="100%"
+                                height={250}
+                                xAxis={{ scale: "time", label: "UTC" }}
+                                yAxis={{ label: "uPnL", formatter: formatUsd }}
+                                maxPoints={5_000}
+                                theme={chartTheme}
+                                timeZone="UTC"
+                            />
+                        </div>
+                        <div className="border-line-subtle overflow-hidden rounded border">
+                            <KwantLineChart
+                                data={performance.realizedPnl}
+                                dataKey={`${detail.runId}:realized-pnl`}
+                                title="Realized PnL"
+                                name={formatUsd(latestRealizedPnl)}
+                                ariaLabel="Backtest realized profit and loss over time"
+                                variant="pnl"
+                                width="100%"
+                                height={250}
+                                xAxis={{ scale: "time", label: "UTC" }}
+                                yAxis={{ label: "PnL", formatter: formatUsd }}
+                                maxPoints={5_000}
+                                theme={chartTheme}
+                                timeZone="UTC"
+                            />
+                        </div>
+                    </div>
+                </section>
             )}
 
             {/* Trades table */}

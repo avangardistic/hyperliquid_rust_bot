@@ -1,4 +1,6 @@
 import { createRoot } from "react-dom/client";
+import "kwant/styles.css";
+import "kwant/line.css";
 import "./index.css";
 import "./kwant-theme.css";
 import App from "./App";

@@ -437,17 +437,11 @@ export type BacktestProgress =
     | { kind: "done" }
     | { kind: "failed"; message: string };
 
-export interface BacktestSource {
-    exchange: "binance" | "bybit" | "htx";
-    market: "spot" | "futures";
-    quoteAsset: "USDT" | "USDC" | string;
-}
-
 export interface BacktestConfig {
     asset: string;
-    source: BacktestSource;
     strategyId: string;
-    resolution: TimeFrame;
+    /** Requests may send null for Auto; completed results contain a value. */
+    resolution: TimeFrame | null;
     margin: number;
     lev: number;
     takerFeeBps: number;
@@ -541,8 +535,6 @@ export interface BacktestRunEntry {
     strategyName: string;
     asset: string;
     resolution: string;
-    exchange: string;
-    market: string;
     margin: number;
     lev: number;
     startTime: number;

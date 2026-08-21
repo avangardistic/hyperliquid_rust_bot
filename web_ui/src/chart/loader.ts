@@ -1,5 +1,4 @@
-import type { CandleData, DataSource, TimeFrame } from "./types";
-import { DEFAULT_QUOTE_ASSET } from "./types";
+import type { CandleData, TimeFrame } from "./types";
 import { getTimeframeCache } from "./candleCache";
 import { fetchCandles } from "./dataSources";
 import { TF_TO_MS } from "../types";
@@ -64,20 +63,16 @@ function cacheToArray(tfCache: Map<number, CandleData>, asset: string) {
 }
 
 export async function loadCandles(
-    source: DataSource,
     tf: TimeFrame,
     startMs: number,
     endMs: number,
     asset: string,
-    quoteAsset = DEFAULT_QUOTE_ASSET,
     setCached?: (c: CandleData[]) => void,
     signal?: AbortSignal
 ): Promise<CandleData[]> {
     if (!asset?.trim()) return [];
 
-    const normalizedAsset = asset.trim().toUpperCase();
-    const normalizedQuote =
-        quoteAsset.trim().toUpperCase() || DEFAULT_QUOTE_ASSET;
+    const normalizedAsset = asset.trim();
 
     const candleIntervalMs = TF_TO_MS[tf];
     const prefetchBuffer = 200 * candleIntervalMs;
@@ -95,12 +90,7 @@ export async function loadCandles(
         rangeEnd,
         candleIntervalMs
     );
-    const tfCache = getTimeframeCache(
-        source,
-        normalizedAsset,
-        normalizedQuote,
-        tf
-    );
+    const tfCache = getTimeframeCache(normalizedAsset, tf);
     const { cached, missing } = collectCachedCandles(
         tfCache,
         normalizedAsset,
@@ -120,9 +110,7 @@ export async function loadCandles(
     for (const segment of missing) {
         if (signal?.aborted) throw abortError();
         const data = await fetchCandles(
-            source,
             normalizedAsset,
-            normalizedQuote,
             segment.start,
             segment.end,
             tf,

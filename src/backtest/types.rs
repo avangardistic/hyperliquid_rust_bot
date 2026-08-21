@@ -4,7 +4,6 @@ use serde::{Deserialize, Serialize};
 
 use uuid::Uuid;
 
-use super::fetcher::DataSource;
 use crate::{EngineView, IndicatorData, OpenPositionLocal, Price, TimeFrame, TradeInfo};
 
 pub type PnlTracker = BTreeMap<u64, f64>;
@@ -13,9 +12,10 @@ pub type PnlTracker = BTreeMap<u64, f64>;
 #[serde(rename_all = "camelCase")]
 pub struct BacktestConfig {
     pub asset: String,
-    pub source: DataSource,
     pub strategy_id: Uuid,
-    pub resolution: TimeFrame,
+    /// `None` requests automatic resolution derived from the strategy's
+    /// indicator timeframes. Results always contain the resolved value.
+    pub resolution: Option<TimeFrame>,
     pub margin: f64,
     pub lev: usize,
     pub taker_fee_bps: u32,
@@ -31,7 +31,9 @@ pub struct BacktestConfig {
 }
 
 fn default_max_equity_points() -> usize {
-    2000
+    // Hyperliquid exposes at most the latest 5,000 candles. Keeping the full
+    // primary series avoids losing uPnL extremes to equity-only downsampling.
+    5000
 }
 
 fn default_max_snapshots() -> usize {
@@ -168,4 +170,37 @@ pub struct BacktestSim {
     pub position: Option<OpenPositionLocal>,
     pub trades: Vec<TradeInfo>,
     pub pnl: PnlTracker,
+}
+
+#[cfg(test)]
+mod tests {
+    use serde_json::json;
+
+    use super::*;
+
+    #[test]
+    fn config_accepts_auto_resolution_and_has_no_source_contract() {
+        let config: BacktestConfig = serde_json::from_value(json!({
+            "asset": "xyz:TSLA",
+            "strategyId": Uuid::nil(),
+            "resolution": null,
+            "margin": 1_000.0,
+            "lev": 2,
+            "takerFeeBps": 3,
+            "makerFeeBps": 1,
+            "fundingRateBpsPer8h": 0.0,
+            "startTime": 1,
+            "endTime": 2,
+            "snapshotIntervalCandles": 10
+        }))
+        .expect("auto-resolution config should deserialize");
+
+        assert_eq!(config.asset, "xyz:TSLA");
+        assert_eq!(config.resolution, None);
+        assert_eq!(config.max_equity_points, default_max_equity_points());
+        assert_eq!(config.max_snapshots, default_max_snapshots());
+
+        let serialized = serde_json::to_value(config).expect("config should serialize");
+        assert!(serialized.get("source").is_none());
+    }
 }

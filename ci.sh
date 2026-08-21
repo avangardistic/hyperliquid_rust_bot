@@ -9,6 +9,7 @@ cargo build --release
 cargo test
 
 cd ./web_ui
+bun run test
 bun run lint
 bun run build
 

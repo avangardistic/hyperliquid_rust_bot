@@ -1,28 +1,26 @@
 import { useState, useEffect, useMemo, useCallback, useRef } from "react";
 import { useParams, useNavigate } from "react-router-dom";
-import { TIMEFRAME_CAMELCASE, TF_TO_MS, sanitizeAsset } from "../types";
+import {
+    TIMEFRAME_CAMELCASE,
+    TF_TO_MS,
+    fromTimeFrame,
+    sanitizeAsset,
+} from "../types";
 import type { BacktestProgress, BacktestResult, TimeFrame } from "../types";
 import ChartContainer from "../chart/ChartContainer";
 import { isTimeframeSupported } from "../chart/dataSources";
 import { loadCandles } from "../chart/loader";
 import { API_URL } from "../consts";
-import {
-    DEFAULT_DATA_SOURCE,
-    type DataSource,
-    type ExchangeId,
-    type MarketType,
-} from "../chart/types";
-import {
-    EXCHANGE_OPTIONS,
-    MARKET_OPTIONS,
-    getMarketsForExchange,
-} from "../chart/providers";
 import AssetIcon from "../chart/visual/AssetIcon";
 import type { CandleData } from "../chart/utils";
 import { useChartContext } from "../chart/ChartContextStore";
 import { useWebSocketContext } from "../context/WebSocketContextStore";
 import { useAuth } from "../context/AuthContextStore";
-import type { Strategy } from "../strats";
+import type { StrategyDetail } from "../strats";
+import {
+    automaticBacktestResolution,
+    isResolutionOverrideAllowed,
+} from "../backtest/resolution";
 import BacktestResultView from "./BacktestResult";
 import SearchBar from "./SearchBar";
 
@@ -72,23 +70,12 @@ const MONTHS = [
     { value: 12, label: "Dec" },
 ];
 
-const QUOTE_ASSET_OPTIONS = ["USDT", "USDC"] as const;
-type QuoteAsset = (typeof QUOTE_ASSET_OPTIONS)[number];
-const BACKTEST_RESOLUTION: TimeFrame = "min1";
-
-type BacktestExchange = "binance" | "bybit" | "htx";
-
 type BacktestRunRequestPayload = {
     runId: string;
     config: {
         asset: string;
-        source: {
-            exchange: BacktestExchange;
-            market: MarketType;
-            quoteAsset: QuoteAsset;
-        };
         strategyId: string;
-        resolution: TimeFrame;
+        resolution: TimeFrame | null;
         margin: number;
         lev: number;
         takerFeeBps: number;
@@ -112,10 +99,6 @@ type BacktestRunErrorPayload = {
     message?: string;
     progress?: BacktestProgress[];
 };
-
-function toBacktestExchange(exchange: ExchangeId): BacktestExchange {
-    return exchange;
-}
 
 function formatUtcMinute(ts: number): string {
     return new Date(ts).toISOString().slice(0, 16).replace("T", " ") + " UTC";
@@ -195,14 +178,11 @@ function BacktestContent({ routeAsset }: BacktestContentProps) {
     const activeAsset = routeAsset ?? "";
     const assetOptions = useMemo(
         () =>
-            universe.map((asset) => {
-                const sanitized = sanitizeAsset(asset.name);
-                return {
-                    value: sanitized,
-                    label: sanitized,
-                    searchText: `${asset.name} ${sanitized}`,
-                };
-            }),
+            universe.map((asset) => ({
+                value: asset.name,
+                label: asset.name,
+                searchText: `${asset.name} ${sanitizeAsset(asset.name)}`,
+            })),
         [universe]
     );
     const defaultStartParts = useMemo(
@@ -215,16 +195,12 @@ function BacktestContent({ routeAsset }: BacktestContentProps) {
     const [intervalOn, setIntervalOn] = useState(false);
     const [candleData, setCandleData] = useState<CandleData[]>([]);
     const [showDatePicker, setShowDatePicker] = useState(true);
-    const [selectedExchange, setSelectedExchange] = useState<ExchangeId>(
-        DEFAULT_DATA_SOURCE.exchange
-    );
-    const [selectedMarket, setSelectedMarket] = useState<MarketType>(
-        DEFAULT_DATA_SOURCE.market
-    );
-    const [selectedStrategy, setSelectedStrategy] = useState<Strategy | null>(
-        null
-    );
-    const [quoteAsset, setQuoteAsset] = useState<QuoteAsset>("USDT");
+    const [selectedStrategyId, setSelectedStrategyId] = useState("");
+    const [selectedStrategy, setSelectedStrategy] =
+        useState<StrategyDetail | null>(null);
+    const [isLoadingStrategy, setIsLoadingStrategy] = useState(false);
+    const [resolutionOverride, setResolutionOverride] =
+        useState<TimeFrame | null>(null);
     const [margin, setMargin] = useState(10_000);
     const [lev, setLev] = useState(8);
     const [warmupCandles, setWarmupCandles] = useState(5_000);
@@ -237,6 +213,7 @@ function BacktestContent({ routeAsset }: BacktestContentProps) {
     const [httpBacktestResult, setHttpBacktestResult] =
         useState<BacktestResult | null>(null);
     const requestIdRef = useRef(0);
+    const strategyRequestIdRef = useRef(0);
     const abortControllerRef = useRef<AbortController | null>(null);
     const backtestAbortRef = useRef<AbortController | null>(null);
 
@@ -311,38 +288,83 @@ function BacktestContent({ routeAsset }: BacktestContentProps) {
         }
     };
 
-    useEffect(() => {
-        const markets = getMarketsForExchange(selectedExchange);
-        if (!markets.includes(selectedMarket)) {
-            setSelectedMarket(markets[0] ?? DEFAULT_DATA_SOURCE.market);
-        }
-    }, [selectedExchange, selectedMarket]);
+    const loadSelectedStrategy = useCallback(
+        async (strategyId: string) => {
+            const requestId = ++strategyRequestIdRef.current;
+            setSelectedStrategyId(strategyId);
+            setSelectedStrategy(null);
+            setBacktestError(null);
 
-    const selectedDataSource = useMemo<DataSource>(
-        () => ({
-            exchange: selectedExchange,
-            market: selectedMarket,
-        }),
-        [selectedExchange, selectedMarket]
+            if (!strategyId) return;
+            if (!token) {
+                setBacktestError("Connect a wallet before loading a strategy.");
+                return;
+            }
+
+            setIsLoadingStrategy(true);
+            try {
+                const response = await fetch(
+                    `${API_URL}/strategies/${strategyId}`,
+                    { headers: { Authorization: `Bearer ${token}` } }
+                );
+                if (!response.ok) {
+                    throw new Error(
+                        `Failed to load strategy (${response.status})`
+                    );
+                }
+                const detail = (await response.json()) as StrategyDetail;
+                if (strategyRequestIdRef.current === requestId) {
+                    setSelectedStrategy(detail);
+                }
+            } catch (error) {
+                if (strategyRequestIdRef.current === requestId) {
+                    setBacktestError(
+                        error instanceof Error
+                            ? error.message
+                            : "Failed to load strategy."
+                    );
+                }
+            } finally {
+                if (strategyRequestIdRef.current === requestId) {
+                    setIsLoadingStrategy(false);
+                }
+            }
+        },
+        [token]
     );
 
     const supportedTimeframes = useMemo(
+        () => TIMEFRAME_ORDER.filter((tf) => isTimeframeSupported(tf)),
+        []
+    );
+
+    const automaticResolution = useMemo(
         () =>
-            TIMEFRAME_ORDER.filter((tf) =>
-                isTimeframeSupported(selectedDataSource, tf)
+            selectedStrategy
+                ? automaticBacktestResolution(selectedStrategy.indicators)
+                : null,
+        [selectedStrategy]
+    );
+
+    const allowedResolutions = useMemo(
+        () =>
+            TIMEFRAME_ORDER.filter((candidate) =>
+                isResolutionOverrideAllowed(candidate, automaticResolution)
             ),
-        [selectedDataSource]
+        [automaticResolution]
     );
 
-    const selectedExchangeMarkets = useMemo(
-        () => getMarketsForExchange(selectedExchange),
-        [selectedExchange]
-    );
-
-    const selectedBacktestExchange = useMemo(
-        () => toBacktestExchange(selectedExchange),
-        [selectedExchange]
-    );
+    useEffect(() => {
+        if (
+            resolutionOverride &&
+            !isResolutionOverrideAllowed(
+                resolutionOverride,
+                automaticResolution
+            )
+        ) {
+            setResolutionOverride(null);
+        }
+    }, [automaticResolution, resolutionOverride]);
 
     const backtestWindow = useMemo(() => {
         const rawStart =
@@ -370,6 +392,9 @@ function BacktestContent({ routeAsset }: BacktestContentProps) {
 
     const canRunBacktest = useMemo(() => {
         if (!routeAsset) return false;
+        if (!selectedStrategy || isLoadingStrategy) return false;
+        if (automaticResolution === null && resolutionOverride === null)
+            return false;
         if (!backtestWindow) return false;
         if (!Number.isFinite(margin) || margin <= 0) return false;
         if (!Number.isFinite(lev) || lev < 1) return false;
@@ -378,6 +403,10 @@ function BacktestContent({ routeAsset }: BacktestContentProps) {
         return true;
     }, [
         routeAsset,
+        selectedStrategy,
+        isLoadingStrategy,
+        automaticResolution,
+        resolutionOverride,
         backtestWindow,
         margin,
         lev,
@@ -440,23 +469,31 @@ function BacktestContent({ routeAsset }: BacktestContentProps) {
             setBacktestError("Backtest interval is invalid.");
             return;
         }
+        if (!selectedStrategy) {
+            setBacktestError("Select and load a strategy before running.");
+            return;
+        }
+        if (automaticResolution === null && resolutionOverride === null) {
+            setBacktestError(
+                "Strategies without indicators require an explicit resolution."
+            );
+            return;
+        }
 
         const clampedLev = Math.max(1, Math.min(100, Math.floor(lev)));
         const clampedWarmup = Math.max(0, Math.floor(warmupCandles));
-        const runId = `bt-${sanitizeAsset(routeAsset).toLowerCase()}-${Date.now()}`;
+        const runIdAsset = routeAsset
+            .replace(/[^a-zA-Z0-9_-]/g, "_")
+            .toLowerCase();
+        const runId = `bt-${runIdAsset}-${Date.now()}`;
         setActiveRunId(runId);
 
         const payload: BacktestRunRequestPayload = {
             runId,
             config: {
-                asset: sanitizeAsset(routeAsset).toUpperCase(),
-                source: {
-                    exchange: selectedBacktestExchange,
-                    market: selectedMarket,
-                    quoteAsset: quoteAsset,
-                },
-                strategyId: selectedStrategy?.id ?? "",
-                resolution: BACKTEST_RESOLUTION,
+                asset: routeAsset.trim(),
+                strategyId: selectedStrategy.id,
+                resolution: resolutionOverride,
                 margin,
                 lev: clampedLev,
                 takerFeeBps: Math.max(0, Math.floor(takerFeeBps)),
@@ -486,23 +523,22 @@ function BacktestContent({ routeAsset }: BacktestContentProps) {
                 signal: controller.signal,
             });
 
-            if (!res.ok) {
-                let message = `Backtest request failed (${res.status})`;
-                try {
-                    const err = (await res.json()) as BacktestRunErrorPayload;
-                    if (err?.message) {
-                        message = err.message;
-                    }
-                    if (err?.runId) {
-                        setActiveRunId(err.runId);
-                    }
-                } catch {
-                    // no-op, fallback status message
+            const responsePayload = (await res.json().catch(() => null)) as
+                | BacktestRunResponsePayload
+                | BacktestRunErrorPayload
+                | null;
+            if (!res.ok || !responsePayload || !("result" in responsePayload)) {
+                const errorPayload = responsePayload as BacktestRunErrorPayload;
+                if (errorPayload?.runId) {
+                    setActiveRunId(errorPayload.runId);
                 }
-                throw new Error(message);
+                throw new Error(
+                    errorPayload?.message ??
+                        `Backtest request failed (${res.status})`
+                );
             }
 
-            const data = (await res.json()) as BacktestRunResponsePayload;
+            const data = responsePayload;
             setActiveRunId(data.runId || runId);
             setHttpBacktestResult(data.result);
             console.info("Backtest completed", data);
@@ -522,13 +558,12 @@ function BacktestContent({ routeAsset }: BacktestContentProps) {
     }, [
         token,
         routeAsset,
-        selectedBacktestExchange,
         backtestWindow,
         lev,
         warmupCandles,
-        selectedMarket,
-        quoteAsset,
         selectedStrategy,
+        automaticResolution,
+        resolutionOverride,
         margin,
         takerFeeBps,
         makerFeeBps,
@@ -606,7 +641,7 @@ function BacktestContent({ routeAsset }: BacktestContentProps) {
     useEffect(() => {
         if (!routeAsset) return;
         if (startTime <= 0 || endTime <= startTime) return;
-        if (!isTimeframeSupported(selectedDataSource, timeframe)) return;
+        if (!isTimeframeSupported(timeframe)) return;
 
         const requestId = ++requestIdRef.current;
         abortControllerRef.current?.abort();
@@ -617,12 +652,10 @@ function BacktestContent({ routeAsset }: BacktestContentProps) {
             (async () => {
                 try {
                     const data = await loadCandles(
-                        selectedDataSource,
                         timeframe,
                         startTime,
                         endTime,
                         routeAsset,
-                        quoteAsset,
                         setCandleData,
                         controller.signal
                     );
@@ -640,14 +673,7 @@ function BacktestContent({ routeAsset }: BacktestContentProps) {
             clearTimeout(timer);
             controller.abort();
         };
-    }, [
-        startTime,
-        endTime,
-        timeframe,
-        routeAsset,
-        selectedDataSource,
-        quoteAsset,
-    ]);
+    }, [startTime, endTime, timeframe, routeAsset]);
 
     useEffect(() => {
         return () => {
@@ -673,13 +699,10 @@ function BacktestContent({ routeAsset }: BacktestContentProps) {
                         <label className="text-app-text/75 flex flex-col gap-1">
                             Strategy
                             <select
-                                value={selectedStrategy?.id ?? ""}
-                                onChange={(e) => {
-                                    const s = strategies.find(
-                                        (s) => s.id === e.target.value
-                                    );
-                                    setSelectedStrategy(s ?? null);
-                                }}
+                                value={selectedStrategyId}
+                                onChange={(e) =>
+                                    void loadSelectedStrategy(e.target.value)
+                                }
                                 className="border-line-muted bg-ink-80 text-app-text rounded border px-2 py-1"
                             >
                                 <option value="" disabled>
@@ -691,20 +714,37 @@ function BacktestContent({ routeAsset }: BacktestContentProps) {
                                     </option>
                                 ))}
                             </select>
+                            {isLoadingStrategy && (
+                                <span className="text-app-text/50 text-xs">
+                                    Loading strategy…
+                                </span>
+                            )}
                         </label>
 
                         <label className="text-app-text/75 flex flex-col gap-1">
-                            Quote Asset
+                            Resolution
                             <select
-                                value={quoteAsset}
-                                onChange={(e) =>
-                                    setQuoteAsset(e.target.value as QuoteAsset)
-                                }
+                                value={resolutionOverride ?? "auto"}
+                                onChange={(e) => {
+                                    setResolutionOverride(
+                                        e.target.value === "auto"
+                                            ? null
+                                            : (e.target.value as TimeFrame)
+                                    );
+                                }}
                                 className="border-line-muted bg-ink-80 text-app-text rounded border px-2 py-1"
                             >
-                                {QUOTE_ASSET_OPTIONS.map((opt) => (
-                                    <option key={opt} value={opt}>
-                                        {opt}
+                                <option
+                                    value="auto"
+                                    disabled={automaticResolution === null}
+                                >
+                                    {automaticResolution
+                                        ? `Auto (${fromTimeFrame(automaticResolution)})`
+                                        : "Auto (indicators required)"}
+                                </option>
+                                {allowedResolutions.map((resolution) => (
+                                    <option key={resolution} value={resolution}>
+                                        {fromTimeFrame(resolution)}
                                     </option>
                                 ))}
                             </select>
@@ -1011,45 +1051,17 @@ function BacktestContent({ routeAsset }: BacktestContentProps) {
                             </div>
                         )}
                         <div className="ml-auto flex flex-wrap items-center gap-2">
-                            <select
-                                value={selectedExchange}
-                                onChange={(e) =>
-                                    setSelectedExchange(
-                                        e.target.value as ExchangeId
-                                    )
-                                }
-                                className="border-line-muted bg-ink-80 text-app-text/80 rounded border px-2 py-1 text-sm"
-                            >
-                                {EXCHANGE_OPTIONS.map((opt) => (
-                                    <option key={opt.value} value={opt.value}>
-                                        {opt.label}
-                                    </option>
-                                ))}
-                            </select>
-
-                            <select
-                                value={selectedMarket}
-                                onChange={(e) =>
-                                    setSelectedMarket(
-                                        e.target.value as MarketType
-                                    )
-                                }
-                                className="border-line-muted bg-ink-80 text-app-text/80 rounded border px-2 py-1 text-sm"
-                            >
-                                {MARKET_OPTIONS.filter((opt) =>
-                                    selectedExchangeMarkets.includes(opt.value)
-                                ).map((opt) => (
-                                    <option key={opt.value} value={opt.value}>
-                                        {opt.label}
-                                    </option>
-                                ))}
-                            </select>
+                            <span className="border-accent-brand-strong bg-ink-80 text-accent-brand rounded border px-3 py-1 text-xs font-semibold tracking-widest">
+                                HYPERLIQUID
+                            </span>
 
                             <div className="min-w-[10rem]">
                                 <SearchBar
                                     value={activeAsset}
                                     onChange={(value) =>
-                                        nav(`/backtest/${sanitizeAsset(value)}`)
+                                        nav(
+                                            `/backtest/${encodeURIComponent(value)}`
+                                        )
                                     }
                                     options={assetOptions}
                                     placeholder="Select asset"

@@ -48,11 +48,7 @@ export default function BacktestResult({
                     </div>
                     <div>
                         <p className="text-app-text/50">Source</p>
-                        <p className="text-app-text">
-                            {result.config.source.exchange.toUpperCase()} /{" "}
-                            {result.config.source.market.toUpperCase()} /{" "}
-                            {result.config.source.quoteAsset}
-                        </p>
+                        <p className="text-app-text">HYPERLIQUID</p>
                     </div>
                     <div>
                         <p className="text-app-text/50">Strategy</p>
@@ -63,7 +59,9 @@ export default function BacktestResult({
                     <div>
                         <p className="text-app-text/50">Resolution</p>
                         <p className="text-app-text">
-                            {fromTimeFrame(result.config.resolution)}
+                            {result.config.resolution
+                                ? fromTimeFrame(result.config.resolution)
+                                : "—"}
                         </p>
                     </div>
                     <div>

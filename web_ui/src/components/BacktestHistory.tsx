@@ -133,7 +133,7 @@ export default function BacktestHistory({
                                         {run.strategyName || run.strategyId}
                                     </td>
                                     <td className="text-app-text/70 py-2 pr-3 uppercase">
-                                        {run.exchange} / {run.market}
+                                        Hyperliquid
                                     </td>
                                     <td
                                         className={`py-2 pr-3 text-right ${

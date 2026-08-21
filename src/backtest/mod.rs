@@ -6,7 +6,7 @@ pub mod types;
 
 pub use backtester::Backtester;
 pub use candle_store::CandleStore;
-pub use fetcher::{DataSource, Exchange, Fetcher, MarketType};
+pub use fetcher::Fetcher;
 pub use types::{
     BacktestConfig, BacktestProgress, BacktestResult, BacktestRunRequest, BacktestSim,
     BacktestSummary, CandlePoint, EquityPoint, PnlTracker, PositionSnapshot, SnapshotReason,

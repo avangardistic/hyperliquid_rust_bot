@@ -794,12 +794,14 @@ if rsi_value < 25.0 {
 Test your strategies against historical data before deploying. Configure:
 
 - **Strategy** -- selected Rhai scripts, state declarations, and indicator set
-- **Traded asset** -- the market being simulated
+- **Traded asset** -- the exact Hyperliquid market being simulated, including HIP-3 markets
 - **Time range** -- start and end timestamps
-- **Resolution** -- candle timeframe for simulation
+- **Resolution** -- Auto derives the largest supported timeframe that divides every configured indicator timeframe; an explicit resolution may be finer, while strategies without indicators require an explicit choice
 - **Margin & Leverage** -- initial capital and leverage
 - **Fees** -- taker/maker fee in basis points
 - **Funding rate** -- simulated funding rate per 8h
+
+Hyperliquid is the sole candle source for both the backtest chart and the server-side simulation. Closed-market periods for HIP-3 assets remain gaps and are not filled with synthetic candles.
 
 Results include equity curve, trade list, win rate, max drawdown, and position snapshots.
 

@@ -13,7 +13,7 @@ use parquet::basic::{Compression, ZstdLevel};
 use parquet::file::properties::WriterProperties;
 use tokio::sync::{Mutex as TokioMutex, OwnedMutexGuard, watch};
 
-use crate::Price;
+use crate::{Price, TimeFrame};
 
 /// Schema for candle parquet files.
 fn candle_schema() -> Schema {
@@ -175,7 +175,7 @@ impl KeyState {
 }
 
 /// Persistent candle cache backed by Parquet files.
-/// One file per (exchange, market, asset, quote, timeframe) combination.
+/// One file per Hyperliquid (asset, timeframe) combination.
 ///
 /// Thread safety: per-key locking serialises writes. When a second fetcher
 /// requests the same key that is already being fetched, it subscribes to
@@ -211,9 +211,13 @@ impl CandleStore {
 
     /// Derive the unique string name for a key (matches the parquet filename stem).
     fn key_name(&self, key: &CandleKey) -> String {
+        // Hex encoding is case-sensitive, collision-free for distinct byte
+        // strings, and prevents namespaced/user-supplied assets from becoming
+        // filesystem path components.
         format!(
-            "{}_{}_{}_{}",
-            key.exchange, key.market, key.asset_quote, key.tf,
+            "HYPERLIQUID_{}_{}",
+            hex::encode(key.asset.as_bytes()),
+            key.tf.as_str()
         )
     }
 
@@ -223,14 +227,13 @@ impl CandleStore {
             .join(format!("{}.parquet", self.key_name(key)))
     }
 
-    /// Acquire the per-key lock. Returns `KeyGuard` which provides:
-    /// - `is_first()`: true if you acquired immediately (you should fetch)
-    /// - `progress_rx()`: a watch receiver to monitor another fetcher's progress
-    /// - `send_progress(loaded, total)`: broadcast progress to waiters
+    /// Acquire the per-key lock. Returns a `KeyGuard` that keeps the key locked
+    /// while the caller checks the cache and fetches any remaining segments.
     ///
     /// If the lock is already held, this method subscribes to progress updates
     /// and relays them through `on_progress` until the lock is released.
-    /// After that it returns with `is_first() == false`.
+    /// After that it returns while still holding the lock, so a partial cache
+    /// fill cannot trigger duplicate concurrent requests.
     pub async fn acquire_key<F>(&self, key: &CandleKey, mut on_progress: F) -> KeyGuard
     where
         F: FnMut(u64, u64),
@@ -242,9 +245,8 @@ impl CandleStore {
             // Reset progress for new fetch
             let _ = state.progress.send((0, 0));
             return KeyGuard {
-                _guard: Some(guard),
+                _guard: guard,
                 state: state.clone(),
-                first: true,
             };
         }
 
@@ -255,7 +257,7 @@ impl CandleStore {
             self.key_name(key)
         );
 
-        loop {
+        let guard = loop {
             // Relay current value
             let (loaded, total) = *rx.borrow_and_update();
             if total > 0 {
@@ -267,7 +269,7 @@ impl CandleStore {
                 changed = rx.changed() => {
                     if changed.is_err() {
                         // Sender dropped — the other fetcher finished or panicked
-                        break;
+                        break state.lock.clone().lock_owned().await;
                     }
                 }
                 // Also try to acquire the lock (it might be released between ticks)
@@ -278,16 +280,14 @@ impl CandleStore {
                     if total > 0 {
                         on_progress(loaded, total);
                     }
-                    drop(guard);
-                    break;
+                    break guard;
                 }
             }
-        }
+        };
 
         KeyGuard {
-            _guard: None,
+            _guard: guard,
             state: state.clone(),
-            first: false,
         }
     }
 
@@ -416,31 +416,31 @@ impl CandleStore {
 
 /// RAII guard returned by `acquire_key`.
 pub struct KeyGuard {
-    _guard: Option<OwnedMutexGuard<()>>,
+    _guard: OwnedMutexGuard<()>,
     state: Arc<KeyState>,
-    first: bool,
 }
 
 impl KeyGuard {
-    /// True if this caller acquired the lock first (should do the fetch).
-    /// False if another task already fetched — data should be in cache.
-    pub fn is_first(&self) -> bool {
-        self.first
-    }
-
-    /// Broadcast progress to any waiters. Only meaningful when `is_first()`.
+    /// Broadcast progress to any waiters.
     pub fn send_progress(&self, loaded: u64, total: u64) {
         let _ = self.state.progress.send((loaded, total));
     }
 }
 
 /// Composite key identifying a candle series.
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, PartialEq, Eq)]
 pub struct CandleKey {
-    pub exchange: String,
-    pub market: String,
-    pub asset_quote: String,
-    pub tf: String,
+    pub asset: String,
+    pub tf: TimeFrame,
+}
+
+impl CandleKey {
+    pub fn new(asset: impl Into<String>, tf: TimeFrame) -> Self {
+        Self {
+            asset: asset.into(),
+            tf,
+        }
+    }
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -453,4 +453,24 @@ pub struct CacheLookup {
     pub missing: Vec<MissingSegment>,
     pub cached: Option<Vec<Price>>,
     pub cached_in_range: u64,
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn key_names_are_path_safe_and_case_sensitive() {
+        let store = CandleStore {
+            base_dir: PathBuf::from("unused"),
+            keys: StdMutex::new(HashMap::new()),
+        };
+        let hip3 = store.key_name(&CandleKey::new("xyz:TSLA", TimeFrame::Hour1));
+        let capitalized = store.key_name(&CandleKey::new("XYZ:TSLA", TimeFrame::Hour1));
+        let traversal = store.key_name(&CandleKey::new("../../BTC", TimeFrame::Min1));
+
+        assert_ne!(hip3, capitalized);
+        assert!(!traversal.contains('/'));
+        assert!(hip3.starts_with("HYPERLIQUID_"));
+    }
 }

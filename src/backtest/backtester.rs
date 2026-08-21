@@ -5,7 +5,7 @@ use log::{info, warn};
 use rhai::Engine;
 
 use super::downsample::{cap_snapshots, lttb_equity};
-use super::fetcher::{DataSource, Fetcher, RequestLimiter};
+use super::fetcher::{Fetcher, RequestLimiter};
 use super::types::{
     BacktestProgress, BacktestResult, BacktestRunRequest, BacktestSummary, CandlePoint,
     EquityPoint, PositionSnapshot, SnapshotReason,
@@ -116,6 +116,7 @@ struct SeriesEvent {
 
 pub struct Backtester {
     request: BacktestRunRequest,
+    resolution: TimeFrame,
     candle_store: Arc<super::candle_store::CandleStore>,
     engine: SignalEngine,
     required_series: Vec<(Arc<str>, TimeFrame)>,
@@ -132,7 +133,7 @@ pub struct Backtester {
 
 impl Backtester {
     pub async fn from_request(
-        request: BacktestRunRequest,
+        mut request: BacktestRunRequest,
         rhai_engine: Arc<Engine>,
         strategy_cache: StrategyCache,
         store: Arc<LocalStore>,
@@ -192,12 +193,15 @@ impl Backtester {
             }
         };
 
+        let resolution = resolve_backtest_resolution(request.config.resolution, &strat_indicators)?;
+        request.config.resolution = Some(resolution);
+
         let mut strat_indicators = strat_indicators;
         replace_self_with_asset(request.config.asset.as_str(), &mut strat_indicators);
         let required_series = collect_required_series(
             &strat_indicators,
             Arc::<str>::from(request.config.asset.as_str()),
-            request.config.resolution,
+            resolution,
         );
 
         let engine = SignalEngine::new_backtest(
@@ -211,6 +215,7 @@ impl Backtester {
 
         Ok(Self {
             request,
+            resolution,
             candle_store,
             engine,
             required_series,
@@ -253,7 +258,7 @@ impl Backtester {
             .filter(|id| !id.trim().is_empty())
             .unwrap_or_else(|| format!("bt-{}-{started_at}", cfg.asset));
         let execution_asset: Arc<str> = Arc::from(cfg.asset.as_str());
-        let tf = cfg.resolution;
+        let tf = self.resolution;
         let sim_start = cfg.start_time;
         let sim_end = cfg.end_time;
         let tf_ms = tf.to_millis();
@@ -293,9 +298,8 @@ impl Backtester {
         let mut next_sim_log = sim_log_step;
 
         info!(
-            "backtest[{run_id}] start asset={} source={:?} exec_tf={:?} sim={}..{} warmup={} required_series=[{}] est_fetch={} est_sim={} workers={} rps={}",
+            "backtest[{run_id}] start asset={} exec_tf={:?} sim={}..{} warmup={} required_series=[{}] est_fetch={} est_sim={} workers={} rps={}",
             cfg.asset,
-            cfg.source,
             tf,
             sim_start,
             sim_end,
@@ -336,7 +340,6 @@ impl Backtester {
                 sim_start.saturating_sub(warmup_target.saturating_mul(series_tf_ms));
             let series_prices = fetch_series_history_with_progress(
                 &run_id,
-                cfg.source.clone(),
                 Arc::clone(series_asset),
                 *series_tf,
                 series_fetch_start,
@@ -1104,7 +1107,7 @@ impl Backtester {
                 .unwrap_or(self.balance),
             &self.equity_curve,
             &self.trades,
-            self.request.config.resolution,
+            self.resolution,
         );
         let closed_trade_pnl = self.trades.iter().map(|t| t.total_pnl).sum::<f64>();
         if (summary.net_pnl - closed_trade_pnl).abs() > 1e-6 {
@@ -1137,6 +1140,42 @@ impl Backtester {
         let id = self.next_order_id;
         self.next_order_id = self.next_order_id.saturating_add(1);
         id
+    }
+}
+
+fn automatic_backtest_resolution(indicators: &[crate::IndexId]) -> Option<TimeFrame> {
+    if indicators.is_empty() {
+        return None;
+    }
+
+    TimeFrame::available_tfs()
+        .into_iter()
+        .rev()
+        .find(|candidate| {
+            let candidate_ms = candidate.to_millis();
+            indicators
+                .iter()
+                .all(|(_, _, tf)| tf.to_millis().is_multiple_of(candidate_ms))
+        })
+}
+
+fn resolve_backtest_resolution(
+    requested: Option<TimeFrame>,
+    indicators: &[crate::IndexId],
+) -> Result<TimeFrame, Error> {
+    let automatic = automatic_backtest_resolution(indicators);
+
+    match (requested, automatic) {
+        (Some(requested), Some(maximum)) if requested.to_millis() > maximum.to_millis() => {
+            Err(Error::Custom(format!(
+                "Backtest resolution {requested} is coarser than the strategy's maximum valid resolution {maximum}"
+            )))
+        }
+        (Some(requested), _) => Ok(requested),
+        (None, Some(automatic)) => Ok(automatic),
+        (None, None) => Err(Error::Custom(
+            "Strategies without indicators require an explicit backtest resolution".to_string(),
+        )),
     }
 }
 
@@ -1184,7 +1223,6 @@ fn format_series_keys(series: &[(Arc<str>, TimeFrame)]) -> String {
 #[allow(clippy::too_many_arguments)]
 async fn stream_fetch_windows_parallel(
     run_id: String,
-    source: DataSource,
     asset: String,
     tf: TimeFrame,
     fetch_start: u64,
@@ -1223,7 +1261,6 @@ async fn stream_fetch_windows_parallel(
         spawn_fetch_worker(
             &mut joinset,
             windows[next_spawn],
-            source.clone(),
             asset.clone(),
             tf,
             request_limiter.clone(),
@@ -1314,7 +1351,6 @@ async fn stream_fetch_windows_parallel(
                     spawn_fetch_worker(
                         &mut joinset,
                         windows[next_spawn],
-                        source.clone(),
                         asset.clone(),
                         tf,
                         request_limiter.clone(),
@@ -1375,7 +1411,6 @@ fn build_fetch_windows(fetch_start: u64, fetch_end: u64, window_span_ms: u64) ->
 fn spawn_fetch_worker(
     joinset: &mut tokio::task::JoinSet<WorkerResult>,
     window: FetchWindow,
-    source: DataSource,
     asset: String,
     tf: TimeFrame,
     request_limiter: Option<RequestLimiter>,
@@ -1386,7 +1421,6 @@ fn spawn_fetch_worker(
     joinset.spawn(async move {
         fetch_window_worker(
             window,
-            source,
             asset,
             tf,
             request_limiter,
@@ -1401,7 +1435,6 @@ fn spawn_fetch_worker(
 #[allow(clippy::too_many_arguments)]
 async fn fetch_window_worker(
     window: FetchWindow,
-    source: DataSource,
     asset: String,
     tf: TimeFrame,
     request_limiter: Option<RequestLimiter>,
@@ -1409,7 +1442,17 @@ async fn fetch_window_worker(
     run_id: String,
     candle_store: Arc<super::candle_store::CandleStore>,
 ) -> WorkerResult {
-    let mut fetcher = Fetcher::new(source, candle_store);
+    let mut fetcher = match Fetcher::new(candle_store).await {
+        Ok(fetcher) => fetcher,
+        Err(error) => {
+            return WorkerResult {
+                idx: window.idx,
+                result: Err(format!(
+                    "failed to create Hyperliquid candle client: {error}"
+                )),
+            };
+        }
+    };
     fetcher.set_request_limiter(request_limiter);
     let result = fetcher
         .fetch_with_progress(&asset, tf, window.start, window.end, |loaded, total| {
@@ -1438,7 +1481,6 @@ async fn fetch_window_worker(
 #[allow(clippy::too_many_arguments)]
 async fn fetch_series_history_with_progress<F>(
     run_id: &str,
-    source: DataSource,
     asset: Arc<str>,
     tf: TimeFrame,
     fetch_start: u64,
@@ -1468,7 +1510,6 @@ where
     let (window_tx, mut window_rx) = tokio::sync::mpsc::channel::<FetchWindowEvent>(2);
     let producer = tokio::spawn(stream_fetch_windows_parallel(
         run_id.to_string(),
-        source,
         asset.to_string(),
         tf,
         fetch_start,
@@ -1973,7 +2014,10 @@ fn snapshot_reason_from_action(action: BtAction) -> Option<SnapshotReason> {
 mod tests {
     use std::sync::Arc;
 
-    use super::{BacktestSeries, SeriesEvent, collect_required_series, next_event_batch};
+    use super::{
+        BacktestSeries, SeriesEvent, automatic_backtest_resolution, collect_required_series,
+        next_event_batch, resolve_backtest_resolution,
+    };
     use crate::{IndicatorKind, Price, TimeFrame};
 
     fn price(ts: u64, close: f64) -> Price {
@@ -2017,6 +2061,71 @@ mod tests {
         assert!(series.contains(&(Arc::<str>::from("BTC"), TimeFrame::Hour1)));
         assert!(series.contains(&(Arc::<str>::from("SOL"), TimeFrame::Min15)));
         assert_eq!(series.len(), 3);
+    }
+
+    #[test]
+    fn automatic_resolution_uses_largest_common_supported_base() {
+        let indicators = vec![
+            (
+                Arc::<str>::from("xyz:TSLA"),
+                IndicatorKind::Rsi(14),
+                TimeFrame::Min3,
+            ),
+            (
+                Arc::<str>::from("kPEPE"),
+                IndicatorKind::Ema(9),
+                TimeFrame::Min5,
+            ),
+        ];
+        assert_eq!(
+            automatic_backtest_resolution(&indicators),
+            Some(TimeFrame::Min1)
+        );
+
+        let aligned = vec![
+            (
+                Arc::<str>::from("BTC"),
+                IndicatorKind::Rsi(14),
+                TimeFrame::Min15,
+            ),
+            (
+                Arc::<str>::from("ETH"),
+                IndicatorKind::Ema(9),
+                TimeFrame::Hour1,
+            ),
+        ];
+        assert_eq!(
+            automatic_backtest_resolution(&aligned),
+            Some(TimeFrame::Min15)
+        );
+    }
+
+    #[test]
+    fn resolution_override_must_not_be_coarser_than_automatic() {
+        let indicators = vec![(
+            Arc::<str>::from("BTC"),
+            IndicatorKind::Rsi(14),
+            TimeFrame::Min15,
+        )];
+
+        assert_eq!(
+            resolve_backtest_resolution(None, &indicators).unwrap(),
+            TimeFrame::Min15
+        );
+        assert_eq!(
+            resolve_backtest_resolution(Some(TimeFrame::Min5), &indicators).unwrap(),
+            TimeFrame::Min5
+        );
+        assert!(resolve_backtest_resolution(Some(TimeFrame::Hour1), &indicators).is_err());
+    }
+
+    #[test]
+    fn strategies_without_indicators_require_an_override() {
+        assert!(resolve_backtest_resolution(None, &[]).is_err());
+        assert_eq!(
+            resolve_backtest_resolution(Some(TimeFrame::Hour4), &[]).unwrap(),
+            TimeFrame::Hour4
+        );
     }
 
     #[test]
