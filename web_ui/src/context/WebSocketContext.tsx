@@ -7,6 +7,7 @@ import type {
     assetMeta,
 } from "../types";
 import type { Strategy } from "../strats";
+import { managedTradePnl } from "../types";
 import { API_URL, WS_ENDPOINT } from "../consts";
 import type { WebSocketContextValue } from "./WebSocketContextStore";
 import { WebSocketContext } from "./WebSocketContextStore";
@@ -291,7 +292,7 @@ export const WebSocketProvider: React.FC<{ children: React.ReactNode }> = ({
                             return {
                                 ...m,
                                 trades: [...(m.trades ?? []), edit.trade],
-                                pnl: (m.pnl ?? 0) + edit.trade.pnl,
+                                pnl: (m.pnl ?? 0) + managedTradePnl(edit.trade),
                             };
                         if ("engineState" in edit)
                             return { ...m, engineState: edit.engineState };
@@ -387,8 +388,7 @@ export const WebSocketProvider: React.FC<{ children: React.ReactNode }> = ({
                                       ...m,
                                       prev: m.price ?? m.prev,
                                       price,
-                                      liveCandle:
-                                          liveCandle ?? m.liveCandle,
+                                      liveCandle: liveCandle ?? m.liveCandle,
                                   }
                                 : m
                         )

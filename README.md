@@ -142,6 +142,27 @@ Use `print("message")` for debugging. In live mode, printed messages and runtime
 
 A strategy is attached to one market. Order helpers such as `open_market`, `open_limit`, `flatten_*`, and `reduce_*` act on that market.
 
+An existing on-chain position can be adopted when adding a market. Its size, side,
+entry price, leverage, and cross/isolated mode are preserved. The market budget
+includes the already committed margin; it must cover that reservation. Percentage
+allocations are calculated after including that position's margin. Outstanding
+orders, including TP/SL, must be canceled before adoption or resume.
+
+The strategy begins in `on_open`, with state variables at their declared defaults.
+For example, `flatten_market()` in `on_open` closes the imported position on the
+next strategy evaluation. `on_idle` is not replayed. When the historical opening
+time is unknown, the strategy's `open_position.open_time` is the adoption time.
+The UI shows the original opening time as unknown.
+
+Imported positions have a manual opening origin and incomplete history. Trade
+records distinguish manual, algorithmic, and mixed execution on each leg. Their
+entry-to-exit PnL includes only known costs; market PnL excludes price PnL already
+present at adoption. Funding and fees shown for imported positions are those
+observed after adoption. Prior fees, realized PnL, and fill history are not invented.
+Pausing cancels tracked orders while retaining the position. Resume reconciles a
+fresh on-chain snapshot before enabling the strategy. View-only markets start
+paused; choose a strategy and resume to manage their positions algorithmically.
+
 Indicators are separate inputs. Each configured indicator is identified by **asset + indicator kind + timeframe** (internally this is the runtime `IndexId`), so one script can read BTC, SOL, ETH, and other signals side by side.
 
 The traded market also gets a `self_...` indicator alias. If a strategy is attached to SOL, these two keys refer to the same configured SOL RSI indicator:

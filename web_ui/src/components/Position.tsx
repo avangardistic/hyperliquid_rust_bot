@@ -1,5 +1,6 @@
 import type { OpenPositionLocal } from "../types";
-import { computeUPnL, num } from "../types";
+import { computeUPnL, num, tradeOriginLabel } from "../types";
+import { formatUTC } from "../chart/utils";
 
 interface PositionTableProps {
     position: OpenPositionLocal;
@@ -18,6 +19,16 @@ const PositionTable = ({
 }: PositionTableProps) => {
     return (
         <table className="min-w-full text-[11px]">
+            <caption className="text-app-text/60 pb-2 text-left">
+                {tradeOriginLabel(position.origin)} opening
+                {position.adoption && (
+                    <span className="block">
+                        Adopted {formatUTC(position.adoption.time)}. Opening
+                        time and prior costs are unknown. Funding below is since
+                        adoption.
+                    </span>
+                )}
+            </caption>
             <thead className="text-app-text/60">
                 <tr>
                     <th className="py-2 pr-2 text-left">Side</th>

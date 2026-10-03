@@ -628,10 +628,19 @@ export type FillType =
 
 export type TriggerKind = "tp" | "sl";
 
+export type TradeOrigin = "manual" | "algo" | "mixed";
+
+export interface AdoptionInfo {
+    time: number;
+    unrealizedPnl: number;
+    fundingSinceOpen: number;
+}
+
 export interface FillInfo {
-    time: number; // unix ms
+    time: number | null; // null when the original opening time is unknown
     price: number;
-    fillType: FillType;
+    fillType: FillType | null;
+    origin?: TradeOrigin | null;
 }
 
 export interface TradeInfo {
@@ -644,17 +653,31 @@ export interface TradeInfo {
     open: FillInfo;
     close: FillInfo;
     strategy?: string;
+    adoption?: AdoptionInfo | null;
+}
+
+export function managedTradePnl(trade: TradeInfo): number {
+    return trade.pnl - (trade.adoption?.unrealizedPnl ?? 0);
+}
+
+export function tradeOriginLabel(origin?: TradeOrigin | null): string {
+    if (origin === "manual") return "Manual";
+    if (origin === "algo") return "Algo";
+    if (origin === "mixed") return "Mixed";
+    return "Unknown";
 }
 
 export interface OpenPositionLocal {
-    openTime: number; // unix ms
+    openTime: number | null;
     size: number;
     entryPx: number;
     side: Side;
     fees: number;
     funding: number;
     realisedPnl: number;
-    fillType: FillType;
+    fillType: FillType | null;
+    origin?: TradeOrigin | null;
+    adoption?: AdoptionInfo | null;
 }
 
 export const indicatorLabels: Record<IndicatorName, string> = {

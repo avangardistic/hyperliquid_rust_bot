@@ -44,7 +44,8 @@ export function xToTime(
     return startTime + normalized * (endTime - startTime);
 }
 
-export function formatUTC(ms: number): string {
+export function formatUTC(ms: number | null | undefined): string {
+    if (ms == null || !Number.isFinite(ms)) return "Unknown";
     const d = new Date(ms);
     const day = d.getUTCDate();
     const month = d.toLocaleString("en-US", {

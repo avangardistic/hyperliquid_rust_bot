@@ -32,6 +32,8 @@ import {
     into,
     num,
     engineDisplayLabel,
+    managedTradePnl,
+    tradeOriginLabel,
 } from "../types";
 import type {
     IndicatorKind,
@@ -1137,6 +1139,9 @@ export default function MarketDetail() {
                                             <th className="py-2 pr-4 text-right">
                                                 Open
                                             </th>
+                                            <th className="py-2 pr-4 text-left">
+                                                Origin (open → close)
+                                            </th>
                                             <th className="py-2 pr-4 text-right">
                                                 Close
                                             </th>
@@ -1181,6 +1186,22 @@ export default function MarketDetail() {
                                                             t.open.price
                                                         )}
                                                     </td>
+                                                    <td className="py-2 pr-4 text-left">
+                                                        {tradeOriginLabel(
+                                                            t.open.origin
+                                                        )}{" "}
+                                                        →{" "}
+                                                        {tradeOriginLabel(
+                                                            t.close.origin
+                                                        )}
+                                                        {t.adoption && (
+                                                            <span className="text-app-text/60 block">
+                                                                Imported ·
+                                                                incomplete
+                                                                history
+                                                            </span>
+                                                        )}
+                                                    </td>
                                                     <td className="py-2 pr-4 text-right">
                                                         {formatPrice(
                                                             t.close.price
@@ -1194,6 +1215,21 @@ export default function MarketDetail() {
                                                         }`}
                                                     >
                                                         {num(t.pnl, 2)}$
+                                                        {t.adoption && (
+                                                            <span
+                                                                className="text-app-text/60 block"
+                                                                title="Entry-to-exit PnL above excludes unknown historical costs. The amount below excludes price PnL already present at adoption."
+                                                            >
+                                                                Since adoption:{" "}
+                                                                {num(
+                                                                    managedTradePnl(
+                                                                        t
+                                                                    ),
+                                                                    2
+                                                                )}
+                                                                $
+                                                            </span>
+                                                        )}
                                                     </td>
                                                     <td className="py-2 pr-4 text-right">
                                                         {num(
@@ -1205,6 +1241,11 @@ export default function MarketDetail() {
 
                                                     <td className="py-2 pr-4 text-right">
                                                         {num(t.fees, 2)}$
+                                                        {t.adoption && (
+                                                            <span className="text-app-text/60 block">
+                                                                Known fees only
+                                                            </span>
+                                                        )}
                                                     </td>
                                                     <td className="py-2 text-right">
                                                         {t.funding}

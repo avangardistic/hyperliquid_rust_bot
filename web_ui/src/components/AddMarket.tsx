@@ -302,7 +302,7 @@ export const AddMarket: React.FC<AddMarketProps> = ({
                                     <span>100%</span>
                                 </div>
                                 <div className="text-app-text text-sm">
-                                    Eq: {computedAmount.toFixed(2)}
+                                    Estimate: {computedAmount.toFixed(2)}
                                 </div>
                             </>
                         ) : (
@@ -326,6 +326,13 @@ export const AddMarket: React.FC<AddMarketProps> = ({
                             }
                             )
                         </label>
+                        <p className="text-app-text/60 mb-2 text-xs">
+                            An existing position keeps its leverage and margin
+                            mode. Your budget includes its committed margin;
+                            percentage estimates may increase when that margin
+                            is included. Cancel outstanding orders, including
+                            TP/SL, before adding the market.
+                        </p>
                         <input
                             type="range"
                             min={1}
